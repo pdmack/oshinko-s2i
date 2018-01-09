@@ -13,6 +13,7 @@ function run_app() {
     if [ "$#" -eq 0 ]; then
         if [ "$stream_exists" -ne 0 ]; then
             poll_build
+	    return $?
         fi
     fi
     set -e
@@ -25,7 +26,7 @@ function build_test_no_app_name {
     run_app_without_application_name
     os::cmd::try_until_not_text 'oc get buildconfig -l app' 'No resources found' $((10*minute))
     NAME=$(oc get buildconfig -l app --template='{{index .items 0 "metadata" "name"}}')
-    os::cmd::try_until_success 'oc logs "$NAME"-1-build | grep "$GIT_URI"'
+    scrape_for_env $NAME-1-build SOURCE_REPOSITORY $GIT_URI
     os::cmd::try_until_success 'oc get is/"$NAME"'
     os::cmd::expect_success 'oc delete buildconfig "$NAME"'
     os::cmd::expect_success 'oc delete is "$NAME"'
@@ -34,7 +35,6 @@ function build_test_no_app_name {
 function build_test_app_file {
     set_defaults
     run_app # runs the build
-    os::cmd::try_until_text 'oc get build "$APP_NAME"-1 --template="{{index .status \"phase\"}}"' "Complete" $((10*minute))
     PULL_SPEC=$(oc describe is $APP_NAME | grep "Docker Pull Spec" | awk '{ print $4; }')
     # The image won't actually run since we're not using a template with all the necessary envs for start.sh
     # So just create the pod and check the environment
@@ -44,7 +44,6 @@ function build_test_app_file {
     force_random_app_name
     set_app_file $1
     run_app # runs the build
-    os::cmd::try_until_text 'oc get build "$APP_NAME"-1 --template="{{index .status \"phase\"}}"' "Complete" $((10*minute))
     PULL_SPEC=$(oc describe is $APP_NAME | grep "Docker Pull Spec" | awk '{ print $4; }')
     # The image won't actually run since we're not using a template with all the necessary envs for start.sh
     # So just create the pod and check the environment

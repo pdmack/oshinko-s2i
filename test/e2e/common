@@ -1,33 +1,33 @@
 #!/bin/bash
+S2I_TEST_LOCAL_IMAGES=${S2I_TEST_LOCAL_IMAGES:-true}
 S2I_TEST_INTEGRATED_REGISTRY=${S2I_TEST_INTEGRATED_REGISTRY:-}
 S2I_TEST_EXTERNAL_REGISTRY=${S2I_TEST_EXTERNAL_REGISTRY:-}
 S2I_TEST_EXTERNAL_USER=${S2I_TEST_EXTERNAL_USER:-}
 S2I_TEST_EXTERNAL_PASSWORD=${S2I_TEST_EXTERNAL_PASSWORD:-}
 
 if [ -z "$S2I_TEST_IMAGE_PYSPARK" ]; then
-    if [ -n "$S2I_TEST_IMAGE_PREFIX" ]; then
-	S2I_TEST_IMAGE_PYSPARK=$S2I_TEST_IMAGE_PREFIX-pyspark
-    else
+    if [ "$S2I_TEST_LOCAL_IMAGES" == true ]; then
 	S2I_TEST_IMAGE_PYSPARK=radanalytics-pyspark
+    else
+	S2I_TEST_IMAGE_PYSPARK=docker.io/radanalyticsio/radanalytics-pyspark
     fi
 fi
 
 if [ -z "$S2I_TEST_IMAGE_JAVA" ]; then
-    if [ -n "$S2I_TEST_IMAGE_PREFIX" ]; then
-	S2I_TEST_IMAGE_JAVA=$S2I_TEST_IMAGE_PREFIX-java
-    else
+    if [ "$S2I_TEST_LOCAL_IMAGES" == true ]; then
 	S2I_TEST_IMAGE_JAVA=radanalytics-java-spark
+    else
+	S2I_TEST_IMAGE_JAVA=docker.io/radanalyticsio/radanalytics-java-spark
     fi
 fi
 
 if [ -z "$S2I_TEST_IMAGE_SCALA" ]; then
-    if [ -n "$S2I_TEST_IMAGE_PREFIX" ]; then
-	S2I_TEST_IMAGE_SCALA=$S2I_TEST_IMAGE_PREFIX-scala
-    else
+    if [ "$S2I_TEST_LOCAL_IMAGES" == true ]; then
 	S2I_TEST_IMAGE_SCALA=radanalytics-scala-spark
+    else
+	S2I_TEST_IMAGE_SCALA=docker.io/radanalyticsio/radanalytics-scala-spark
     fi
 fi
-
 
 S2I_TEST_SPARK_IMAGE=${S2I_TEST_SPARK_IMAGE:-docker.io/radanalyticsio/openshift-spark}
 
@@ -39,12 +39,16 @@ MY_SCRIPT=`basename "$0"`
 # RESOURCE_DIR will be the directory containing this file
 RESOURCE_DIR=$(readlink -f `dirname "${BASH_SOURCE[0]}"`)/resources
 
+PYSPARK_DIR=$(readlink -f `dirname "${BASH_SOURCE[0]}"` | grep -o '.*/oshinko-s2i')/templates
+
 # We count on this file being somewhere below oshinko-s2i, and
 # the location of hack/lib under oshinko-s2i
 source $(readlink -f `dirname "${BASH_SOURCE[0]}"` | grep -o '.*/oshinko-s2i')/hack/lib/init.sh
 
 function print_test_env {
-    if [ -n "$S2I_TEST_EXTERNAL_REGISTRY" ]; then
+    if [ "$S2I_TEST_LOCAL_IMAGES" != true ]; then
+	echo S2I_TEST_LOCAL_IMAGES = $S2I_TEST_LOCAL_IMAGES, all s2i builder images are external, ignoring registry env vars
+    elif [ -n "$S2I_TEST_EXTERNAL_REGISTRY" ]; then
         echo Using external registry $S2I_TEST_EXTERNAL_REGISTRY
         if [ -z "$S2I_TEST_EXTERNAL_USER" ]; then
             echo "WARNING: S2I_TEST_EXTERNAL_USER not set!"
@@ -61,9 +65,9 @@ function print_test_env {
     else
         echo Not using external or integrated registry
     fi
-    echo Using local s2i pyspark image $S2I_TEST_IMAGE_PYSPARK
-    echo Using local s2i java image $S2I_TEST_IMAGE_JAVA
-    echo Using local s2i scala image $S2I_TEST_IMAGE_SCALA
+    echo Using s2i pyspark image $S2I_TEST_IMAGE_PYSPARK
+    echo Using s2i java image $S2I_TEST_IMAGE_JAVA
+    echo Using s2i scala image $S2I_TEST_IMAGE_SCALA
     echo Using spark image $S2I_TEST_SPARK_IMAGE
     echo Using $S2I_TEST_WORKERS workers
 }
@@ -105,6 +109,21 @@ function clear_cluster_name() {
     GEN_CLUSTER_NAME=""
 }
 
+function set_driver_config() {
+    init_driver_config
+    DRIVER_CONFIG=driverconfig
+}
+
+function delete_driver_config() {
+    set +e
+    oc delete configmap driverconfig
+    set -e
+}
+
+function clear_driver_config() {
+    DRIVER_CONFIG=
+}
+
 function init_config_map() {
     set +e
     oc delete configmap clusterconfig masterconfig workerconfig &>/dev/null
@@ -115,6 +134,13 @@ function init_config_map() {
                                       --from-literal=sparkimage=$S2I_TEST_SPARK_IMAGE \
                                       --from-literal=sparkmasterconfig=masterconfig \
                                       --from-literal=sparkworkerconfig=workerconfig &>/dev/null
+}
+
+function init_driver_config() {
+    set +e
+    oc delete configmap driverconfig
+    set -e
+    oc create configmap driverconfig  --from-file=$RESOURCE_DIR/driverconfig
 }
 
 function set_worker_count() {
@@ -130,6 +156,7 @@ function set_defaults() {
     clear_app_exit
     clear_test_mode
     clear_cluster_name
+    clear_driver_config
 }
 
 function run_app() {
@@ -143,7 +170,7 @@ function run_app() {
 	return 1
     fi
     if [ "$1" != true ]; then
-        os::cmd::expect_success 'oc new-app --file="$RESOURCE_DIR"/pysparkdc.json -p IMAGE=play -p APPLICATION_NAME="$APP_NAME" -p APP_EXIT="$DO_EXIT" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -p TEST_MODE="$DO_TEST" -p OSHINKO_NAMED_CONFIG=clusterconfig'
+        os::cmd::expect_success 'oc new-app --file="$PYSPARK_DIR"/pysparkdc.json -p IMAGE=play -p APPLICATION_NAME="$APP_NAME" -p APP_EXIT="$DO_EXIT" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -p OSHINKO_NAMED_CONFIG=clusterconfig -p OSHINKO_SPARK_DRIVER_CONFIG="$DRIVER_CONFIG" -e TEST_MODE="$DO_TEST"'
 
         os::cmd::try_until_text 'oc logs dc/$APP_NAME' 'Using.*cluster' $((5*minute))
         GEN_CLUSTER_NAME=$(oc logs dc/$APP_NAME | sed -rn "s@Using (shared|ephemeral) cluster (.*$)@\2@p")
@@ -153,7 +180,7 @@ function run_app() {
 	if [ "$GEN_CLUSTER_NAME" == "" ]; then
             GEN_CLUSTER_NAME=cl-$SUFFIX
 	fi
-        os::cmd::expect_success 'oc new-app --file="$RESOURCE_DIR"/pysparkdc.json -p IMAGE=play -p OSHINKO_CLUSTER_NAME="$GEN_CLUSTER_NAME" -p APPLICATION_NAME="$APP_NAME" -p APP_EXIT="$DO_EXIT" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -p TEST_MODE="$DO_TEST" -p OSHINKO_NAMED_CONFIG=clusterconfig'
+        os::cmd::expect_success 'oc new-app --file="$PYSPARK_DIR"/pysparkdc.json -p IMAGE=play -p OSHINKO_CLUSTER_NAME="$GEN_CLUSTER_NAME" -p APPLICATION_NAME="$APP_NAME" -p APP_EXIT="$DO_EXIT" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -p OSHINKO_NAMED_CONFIG=clusterconfig -p OSHINKO_SPARK_DRIVER_CONFIG="$DRIVER_CONFIG" -e TEST_MODE="$DO_TEST"'
     fi 
     echo Using cluster name $GEN_CLUSTER_NAME
     MASTER_DC=$GEN_CLUSTER_NAME-m
@@ -174,7 +201,7 @@ function run_job() {
 	return 1
     fi
     if [ "$1" != true ]; then
-        os::cmd::expect_success 'oc process -f "$RESOURCE_DIR"/pysparkjob.json -p IMAGE="$IMAGE_NAME" -p APPLICATION_NAME="$APP_NAME" -p APP_EXIT="$DO_EXIT" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -p TEST_MODE="$DO_TEST" | oc create -f -'
+        os::cmd::expect_success 'oc new-app -f "$PYSPARK_DIR"/pysparkjob.json -p IMAGE="$IMAGE_NAME" -p APPLICATION_NAME="$APP_NAME" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -e APP_EXIT="$DO_EXIT" -e TEST_MODE="$DO_TEST"'
         # Well, we have no easy way of figuring out what the clustername is here since we're not using a dc but if we figure out the pod name we can grep the log
         # Use the os::cmd_try_until_xxx functions to gate
         os::cmd::try_until_success 'oc get pod -l app="$APP_NAME"'
@@ -186,7 +213,7 @@ function run_job() {
 	if [ "$GEN_CLUSTER_NAME" == "" ]; then
             GEN_CLUSTER_NAME=cl-$SUFFIX
 	fi
-        os::cmd::expect_success 'oc process -f "$RESOURCE_DIR"/pysparkjob.json -p IMAGE="$IMAGE_NAME" -p OSHINKO_CLUSTER_NAME="$GEN_CLUSTER_NAME" -p APPLICATION_NAME="$APP_NAME" -p APP_EXIT="$DO_EXIT" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -p TEST_MODE="$DO_TEST" | oc create -f -'
+        os::cmd::expect_success 'oc new-app -f "$PYSPARK_DIR"/pysparkjob.json -p IMAGE="$IMAGE_NAME" -p OSHINKO_CLUSTER_NAME="$GEN_CLUSTER_NAME" -p APPLICATION_NAME="$APP_NAME" -p APP_ARGS="$SLEEP" -p OSHINKO_DEL_CLUSTER="$DEL_CLUSTER" -e APP_EXIT="$DO_EXIT" -e TEST_MODE="$DO_TEST"'
     fi
     echo Using cluster name $GEN_CLUSTER_NAME
     MASTER_DC=$GEN_CLUSTER_NAME-m
@@ -196,21 +223,18 @@ function run_job() {
 function cleanup_app() {
 
     # We may have code shared by build templates and app templates
-    # that calls cleanup_app, and the build tempaltes may not have dcs ...
+    # that calls cleanup_app, and the build templates may not have dcs ...
     set +e
-    oc scale dc/"$APP_NAME" --replicas=0
+    local test=$(oc get dc "$APP_NAME" &> /dev/null)
+    if [ "$?" -eq 0 ]; then
+        oc delete dc/"$APP_NAME" &> /dev/null
+        os::cmd::try_until_failure 'oc get dc/"$APP_NAME"' $((10*minute))
+        if [ "$#" -eq 1 ]; then
+            local POD_NAME=$1
+            os::cmd::try_until_failure 'oc get pod/"$POD_NAME"' $((10*minute))
+        fi
+    fi
     set -e
-    os::cmd::try_until_text 'oc get pods -l deploymentconfig="$APP_NAME"' 'No resources found' $((5*minute))
-    set +e
-    oc delete dc/"$APP_NAME"
-    os::cmd::try_until_failure 'oc logs dc/$APP_NAME' $((5*minute))
-    set -e
-#    if [ "$#" -eq 1 ]; then
-#        #os::cmd::try_until_failure 'oc get dc "$MASTER_DC"' $((5*minute))
-#        #os::cmd::try_until_failure 'oc get dc "$WORKER_DC"' $((5*minute))
-#        os::cmd::try_until_failure 'oc get service "$GEN_CLUSTER_NAME"' $((5*minute))
-#        os::cmd::try_until_failure 'oc get service "$GEN_CLUSTER_NAME"-ui' $((5*minute))
-#    fi
 }
 
 function cleanup_cluster() {
@@ -230,27 +254,71 @@ function cleanup_cluster() {
 #    fi
 } 
 
+function poll_build() {
+    local name
+    if [ "$#" -eq 1 ]; then
+	name=$1
+    else
+	name=$APP_NAME
+    fi
+    local tries=0
+    local status
+    local BUILDNUM
+    while true; do
+        BUILDNUM=$(oc get buildconfig $name --template='{{index .status "lastVersion"}}')
+        status=$(oc get build "$name"-$BUILDNUM --template="{{index .status \"phase\"}}")
+	if [ "$status" != "Complete" -a "$status" != "Failed" -a "$status" != "Error" ]; then
+	    echo Build for $name-$BUILDNUM status is $status, waiting ...
+	    sleep 10
+	elif [ "$status" == "Failed" -o "$status" == "Error" ]; then
+	    set +e
+	    oc log buildconfig/$name | grep "Pushing image"
+	    if [ "$?" -eq 0 ]; then
+		tries=$((tries+1))
+		if [ "$tries" -lt 5 ]; then
+		    echo Build failed on push, retrying
+		    sleep 5
+		    oc start-build $name
+		    continue
+		fi
+	    fi
+	    oc log buildconfig/$name | tail -100
+	    set -e
+	    oc delete buildconfig $name
+	    oc delete is $name
+	    set +e
+	    oc delete dc $name
+	    set -e
+	    return 1
+	else
+	    break
+	fi
+    done
+}
+
 function make_image() {
+    local skip_push=1
     TEST_IMAGE=play
     set +e
     oc get buildconfig play &> /dev/null
     local res=$?
     set -e
-    if [ "$res" -ne 0 ]; then
-        # The ip address of the internal registry may be set to support running against
-        # an openshift that is not "oc cluster up". In the case of "oc cluster up", the docker
-        # on the host is available from openshift so no special pushes of images have to be done.
-        # In the case of a "normal" openshift cluster, the image we'll use for build has to be
-        # available as an imagestream.
-        set +e
-        tmp=$(docker history $S2I_TEST_IMAGE_PYSPARK)
-        res=$?
-        set -e
-        if [ "$res" -ne 0 ]; then
-            echo Uh oh, image $S2I_TEST_IMAGE_PYSPARK does not exist
-            return 1
-        fi
 
+    # If we found the buildconfig for play, then the build
+    # succeeded because we would have deleted it last time in poll_build
+    # if it ultimately failed with retries. So we're good.
+
+    # If not, build it from scratch with retries
+
+    if [ "$res" -ne 0 ]; then
+        # The ip address of an internal/external registry may be set to support running against
+        # an openshift that is not "oc cluster up" when using images that have been built locally.
+        # In the case of "oc cluster up", the docker on the host is available from openshift so
+        # no special pushes of images have to be done.
+        # In the case of a "normal" openshift cluster, a local image we'll use for build has to be
+        # available from the designated registry.
+        # If we're using a pyspark image already in an external registry, openshift can pull it from
+        # there and we don't have to do anything.
 	local user=
 	local password=
 	local pushproj=
@@ -258,21 +326,23 @@ function make_image() {
 	local registry=
 	local imagestream=
 
-	if [ -n  "$S2I_TEST_EXTERNAL_REGISTRY" ]; then
-	    user=$S2I_TEST_EXTERNAL_USER
-	    password=$S2I_TEST_EXTERNAL_PASSWORD
-	    pushproj=$user
-	    pushimage=scratch-radanalytics-pyspark
-	    registry=$S2I_TEST_EXTERNAL_REGISTRY
-	    imagestream=false
+	if [ "$S2I_TEST_LOCAL_IMAGES" == true ]; then
+	    if [ -n  "$S2I_TEST_EXTERNAL_REGISTRY" ]; then
+	        user=$S2I_TEST_EXTERNAL_USER
+	        password=$S2I_TEST_EXTERNAL_PASSWORD
+	        pushproj=$user
+	        pushimage=scratch-radanalytics-pyspark
+	        registry=$S2I_TEST_EXTERNAL_REGISTRY
+	        imagestream=false
 
-	elif [ -n "$S2I_TEST_INTEGRATED_REGISTRY" ]; then
-	    user=$(oc whoami)
-	    password=$(oc whoami -t)
-	    pushproj=$PROJECT
-	    pushimage=radanalytics-pyspark
-	    registry=$S2I_TEST_INTEGRATED_REGISTRY
-	    imagestream=true
+	    elif [ -n "$S2I_TEST_INTEGRATED_REGISTRY" ]; then
+	        user=$(oc whoami)
+	        password=$(oc whoami -t)
+	        pushproj=$PROJECT
+	        pushimage=radanalytics-pyspark
+	        registry=$S2I_TEST_INTEGRATED_REGISTRY
+	        imagestream=true
+	    fi
 	fi
 
         if [ -z "$registry" ]; then
@@ -295,25 +365,11 @@ function make_image() {
 		os::cmd::expect_success 'oc new-build --name=play --docker-image="$registry"/"$pushproj"/"$pushimage":latest --binary'
 	    fi
         fi
+	os::cmd::expect_success 'oc start-build play --from-file="$RESOURCE_DIR"/play'
+	poll_build play
+	if [ "$?" -ne 0 ]; then
+	    echo make_image failed, exiting
+	    exit 1
+	fi
     fi
-    BUILDNUM=$(oc get buildconfig play --template='{{index .status "lastVersion"}}')
-    set +e
-    oc get build play-$BUILDNUM &> /dev/null
-    res=$?
-    set -e
-    if [ "$res" -eq 0 ]; then
-        # Make sure that the build is complete. If not, start another one.
-	phase=$(oc get build play-$BUILDNUM --template="{{index .status \"phase\"}}")
-        if [ "$phase" != "Running" -a "$phase" != "Complete" ]; then
-            echo "Build phase for play-$BUILDNUM is $phase, restarting..."
-            res=1
-        fi
-    fi
-    if [ "$res" -ne 0 ]; then
-        os::cmd::expect_success 'oc start-build play --from-file="$RESOURCE_DIR"/play'
-        BUILDNUM=$(oc get buildconfig play --template='{{index .status "lastVersion"}}')
-        oc logs -f buildconfig/play
-    fi
-    # Wait for the build to finish
-    os::cmd::try_until_text 'oc get build play-"$BUILDNUM" --template="{{index .status \"phase\"}}"' "Complete" $((5*minute))
 }
